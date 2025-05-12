@@ -150,8 +150,7 @@ function App() {
           <Grid container spacing={2}>
             {renderPredictionCard('Variety Prediction', predictions.variety)}
             {renderPredictionCard('Disease Prediction', predictions.disease)}
-            {/* {predictions.age_efficientnet && 
-              renderPredictionCard('Age Prediction (EfficientNet)', predictions.age_efficientnet)} */}
+            {renderPredictionCard('Age Prediction (days)', predictions.age)}
           </Grid>
         </Container>
       )}

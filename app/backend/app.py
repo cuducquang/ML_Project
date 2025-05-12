@@ -1,115 +1,149 @@
-# backend/app.py
 import os
 import numpy as np
-import tensorflow as tf
 import torch
+import torch.nn as nn
+from torchvision import models, transforms
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
-from utils import preprocess_image, preprocess_efficientnet_image
+from PIL import Image
 from typing import Dict, Any
+import tensorflow as tf
 
+# Flask config
 app = Flask(__name__)
 CORS(app)
 
-# Configure upload folder
 UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-
-# Ensure upload directory exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Load models
+# === CLASS DEFINITIONS ===
+class AgeRegressor(nn.Module):
+    def __init__(self, num_labels, num_varieties):
+        super().__init__()
+        self.base = models.efficientnet_b0(weights=None)
+        self.base.classifier = nn.Identity()
+        self.metadata_dim = num_labels + num_varieties + 1
+        self.head = nn.Sequential(
+            nn.Linear(1280 + self.metadata_dim, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(256, 1)
+        )
+
+    def forward(self, x, label_vec, variety_vec, grvi_scalar):
+        features = self.base(x)
+        meta = torch.cat([label_vec, variety_vec, grvi_scalar], dim=1)
+        combined = torch.cat([features, meta], dim=1)
+        return self.head(combined)
+
+# === HELPER FUNCTIONS ===
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def preprocess_image(filepath):
+    img = Image.open(filepath).convert("RGB")
+    img = img.resize((224, 224))
+    img = np.array(img) / 255.0
+    img = np.expand_dims(img, axis=0)  # (1, 224, 224, 3)
+    return img
+
+def preprocess_efficientnet_image(filepath):
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+    ])
+    image = Image.open(filepath).convert("RGB")
+    tensor = transform(image).unsqueeze(0)  # (1, 3, 224, 224)
+    return tensor
+
+# === LOAD MODELS ===
 def load_models():
-    models = {
-        'disease': tf.keras.models.load_model('models/disease_model.h5'),
-        'variety': tf.keras.models.load_model('models/variety_model.h5'),
-        # 'age_efficientnet': torch.load('models/age_efficientnet.pth')
+    models_dict = {
+        'disease': tf.keras.models.load_model('../models/diseased_model.h5'),
+        'variety': tf.keras.models.load_model('../models/variety_model.h5'),
+        'age_efficientnet': AgeRegressor(num_labels=3, num_varieties=17)
     }
-    return models
+    models_dict['age_efficientnet'].load_state_dict(torch.load('../models/age_model.pth', map_location='cpu'))
+    models_dict['age_efficientnet'].eval()
+    return models_dict
 
 MODELS = load_models()
 
-def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+# === CLASSES ===
+diseases = ['bacterial_leaf_blight', 'bacterial_leaf_streak', 'bacterial_panicle_blight', 'blast', 'brown_spot', 'dead_heart', 'downy_mildew', 'hispa', 'normal', 'tungro']
+varieties = ['ADT45', 'AndraPonni', 'AtchayaPonni', 'IR20', 'KarnatakaPonni', 'Onthanel', 'Ponni', 'RR', 'Surya', 'Zonal']
 
+# === MAIN PREDICTION ENDPOINT ===
 @app.route('/predict_all', methods=['POST'])
 def predict_all():
-    # Check if file is present
     if 'file' not in request.files:
-        return jsonify({'error': 'No file part'}), 400
-    
+        return jsonify({'error': 'No file uploaded'}), 400
+
     file = request.files['file']
-    
-    # Check if filename is empty
     if file.filename == '':
         return jsonify({'error': 'No selected file'}), 400
-    
-    # Check if file is allowed
     if not allowed_file(file.filename):
         return jsonify({'error': 'File type not allowed'}), 400
-    
-    # Save file
+
     filename = secure_filename(file.filename)
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
     file.save(filepath)
-    
-    try:
-        diseases = ['bacterial_leaf_blight', 'bacterial_leaf_streak', 'bacterial_panicle_blight', 'blast', 'brown_spot', 'dead_heart', 'downy_mildew', 'hispa', 'normal', 'tungro']
-        varieties = ['ADT45', 'AndraPonni', 'AtchayaPonni', 'IR20', 'KarnatakaPonni', 'Onthanel', 'Ponni', 'RR', 'Surya', 'Zonal']
 
-        # Prediction results
+    try:
         predictions: Dict[str, Any] = {}
-        
-        # Variety Prediction
-        variety_img = preprocess_image(filepath)
-        variety_pred = MODELS['variety'].predict(variety_img)
-        predictions['variety'] = {
-            'predicted': varieties[np.argmax(variety_pred)],
-            'confidence': float(np.max(variety_pred))
-        }
-        
-        # Disease Prediction
-        disease_img = preprocess_image(filepath)
-        disease_pred = MODELS['disease'].predict(disease_img)
+
+        # === 1. Disease prediction ===
+        img_np = preprocess_image(filepath)
+        disease_pred = MODELS['disease'].predict(img_np)
+        label_idx = int(np.argmax(disease_pred))
+        label_conf = float(np.max(disease_pred))
         predictions['disease'] = {
-            'predicted': diseases[np.argmax(disease_pred)],
-            'confidence': float(np.max(disease_pred))
+            'predicted': diseases[label_idx],
+            'confidence': label_conf
         }
+
+        # === 2. Variety prediction ===
+        variety_pred = MODELS['variety'].predict(img_np)
+        variety_idx = int(np.argmax(variety_pred))
+        variety_conf = float(np.max(variety_pred))
+        predictions['variety'] = {
+            'predicted': varieties[variety_idx],
+            'confidence': variety_conf
+        }
+
+        # === 3. Age prediction ===
+        img_tensor = preprocess_efficientnet_image(filepath)
+        label_onehot = torch.zeros((1, 3))
+        label_onehot[0, label_idx % 3] = 1.0
+        variety_onehot = torch.zeros((1, 17))
+        variety_onehot[0, variety_idx] = 1.0
+        grvi_scalar = torch.tensor([[0.5]])
+
+        with torch.no_grad():
+            age_output = MODELS['age_efficientnet'](img_tensor, label_onehot, variety_onehot, grvi_scalar)
+            age_value = int(round(age_output.item()))
         
-        # Age Prediction (EfficientNet with .pth)
-        # try:
-        #     # Preprocess for EfficientNet requires both image and variety
-        #     # Example preprocessing - you'll need to adjust based on your specific model
-        #     variety_index = np.argmax(variety_pred)
-        #     age_efficientnet_img = preprocess_efficientnet_image(filepath, variety_index)
-            
-        #     # Switch model to evaluation mode
-        #     MODELS['age_efficientnet'].eval()
-            
-        #     # Disable gradient computation
-        #     with torch.no_grad():
-        #         age_efficientnet_pred = MODELS['age_efficientnet'](age_efficientnet_img)
-            
-        #     predictions['age_efficientnet'] = {
-        #         'predicted': float(age_efficientnet_pred.numpy()[0]),
-        #         'confidence': 1.0  # Adjust as needed
-        #     }
-        # except Exception as age_error:
-        #     predictions['age_efficientnet'] = {
-        #         'error': f'Age prediction (EfficientNet) failed: {str(age_error)}'
-        #     }
-        
+        predictions['age'] = {
+            'predicted': age_value,
+            'confidence': 1.0
+        }
+
         return jsonify(predictions)
-    
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
-        # Clean up uploaded file
         if os.path.exists(filepath):
             os.remove(filepath)
 
+# === RUN FLASK ===
 if __name__ == '__main__':
     app.run(debug=True)

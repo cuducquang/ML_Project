@@ -1,0 +1,3 @@
+app/models/age_model.pth
+app/models/diseased_model.h5
+app/models/variety_model.h5
