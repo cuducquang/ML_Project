@@ -299,4 +299,5 @@ if __name__ == '__main__':
     else:
         logger.warning("Models could not be loaded at startup. They will be loaded on first request.")
     
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 4000))  # Use env PORT or default to 4000
+    app.run(debug=True, host='0.0.0.0', port=port)
