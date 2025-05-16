@@ -12,7 +12,7 @@ import {
   CircularProgress,
 } from "@mui/material";
 
-const PREDICT_API = "http://143.198.195.1:8000/predict_all";
+const PREDICT_API = "https://3bec-143-198-195-1.ngrok-free.app/predict_all";
 
 function App() {
   const [selectedFile, setSelectedFile] = useState(null);
