@@ -12,7 +12,7 @@ import {
   CircularProgress,
 } from "@mui/material";
 
-const PREDICT_API = "https://rmit-ml-asm2.onrender.com/predict_all";
+const PREDICT_API = "http://143.198.195.1:8000/predict_all";
 
 function App() {
   const [selectedFile, setSelectedFile] = useState(null);

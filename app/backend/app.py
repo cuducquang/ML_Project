@@ -122,7 +122,7 @@ def download_models_from_gdrive():
             
         logger.info(f"Extracting models to {MODELS_FOLDER}...")
         with zipfile.ZipFile(MODEL_ZIP_PATH, 'r') as zip_ref:
-            zip_ref.extractall(MODELS_FOLDER)
+            zip_ref.extractall(".")
             
         # Clean up zip file after extraction
         os.remove(MODEL_ZIP_PATH)
