@@ -1,0 +1,8 @@
+Link deploy application: https://ml-project-frontend.onrender.com
+
+Contribution:
+Name                        sID                 Percentage
+Bui Hoang Quynh Chi         s3978316            25%
+Tran Phan Trong Phuc        s3979081            25%
+Cu Duc Quang                s4021255            25%
+Tang Trung Son              s3978330            25%
