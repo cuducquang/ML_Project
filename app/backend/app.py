@@ -9,15 +9,36 @@ from werkzeug.utils import secure_filename
 from PIL import Image
 from typing import Dict, Any
 import tensorflow as tf
+import gdown
+import zipfile
+import pathlib
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, 
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Flask config
 app = Flask(__name__)
 CORS(app)
 
 UPLOAD_FOLDER = 'uploads'
+MODELS_FOLDER = 'models'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+# Create necessary directories
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(MODELS_FOLDER, exist_ok=True)
+
+# Google Drive model URL - extract the file ID for gdown
+GDRIVE_FILE_ID = '1RDI1mty4jugBDuIPG13jRKn_Gg4pZwBS'
+MODEL_ZIP_PATH = os.path.join(MODELS_FOLDER, 'models.zip')
+
+# Initialize models as None - will be loaded during app initialization
+MODELS = None
+
 
 # === CLASS DEFINITIONS ===
 class AgeRegressor(nn.Module):
@@ -64,26 +85,114 @@ def preprocess_efficientnet_image(filepath):
     tensor = transform(image).unsqueeze(0)  # (1, 3, 224, 224)
     return tensor
 
+
+# === DOWNLOAD MODELS FROM GOOGLE DRIVE ===
+def download_models_from_gdrive():
+    """Download model files from Google Drive if they don't exist locally"""
+    logger.info("Checking for model files...")
+    
+    # Define the expected model file paths
+    disease_model_path = os.path.join(MODELS_FOLDER, 'diseased_model.h5')
+    variety_model_path = os.path.join(MODELS_FOLDER, 'variety_model.h5')
+    age_model_path = os.path.join(MODELS_FOLDER, 'age_model.pth')
+    
+    # Check if models already exist
+    models_exist = (
+        os.path.exists(disease_model_path) and
+        os.path.exists(variety_model_path) and
+        os.path.exists(age_model_path)
+    )
+    
+    if models_exist:
+        logger.info("Model files already exist. Skipping download.")
+        return True
+    
+    try:
+        logger.info(f"Downloading models from Google Drive using file ID: {GDRIVE_FILE_ID}")
+        # Use the direct file ID format for gdown
+        output = gdown.download(id=GDRIVE_FILE_ID, output=MODEL_ZIP_PATH, quiet=False)
+        
+        if output is None:
+            logger.error("Download failed - gdown returned None")
+            return False
+            
+        if not os.path.exists(MODEL_ZIP_PATH):
+            logger.error(f"Download failed - zip file not found at {MODEL_ZIP_PATH}")
+            return False
+            
+        logger.info(f"Extracting models to {MODELS_FOLDER}...")
+        with zipfile.ZipFile(MODEL_ZIP_PATH, 'r') as zip_ref:
+            zip_ref.extractall(MODELS_FOLDER)
+            
+        # Clean up zip file after extraction
+        os.remove(MODEL_ZIP_PATH)
+        logger.info("Models downloaded and extracted successfully!")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error downloading or extracting models: {e}")
+        return False
+
+
 # === LOAD MODELS ===
 def load_models():
-    models_dict = {
-        'disease': tf.keras.models.load_model('../models/diseased_model.h5'),
-        'variety': tf.keras.models.load_model('../models/variety_model.h5'),
-        'age_efficientnet': AgeRegressor(num_labels=3, num_varieties=17)
-    }
-    models_dict['age_efficientnet'].load_state_dict(torch.load('../models/age_model.pth', map_location='cpu'))
-    models_dict['age_efficientnet'].eval()
-    return models_dict
+    global MODELS
+    
+    # First ensure models are downloaded
+    if not download_models_from_gdrive():
+        logger.error("Failed to download models. Cannot continue.")
+        return False
+    
+    try:
+        logger.info("Loading models into memory...")
+        MODELS = {
+            'disease': tf.keras.models.load_model(os.path.join(MODELS_FOLDER, 'diseased_model.h5')),
+            'variety': tf.keras.models.load_model(os.path.join(MODELS_FOLDER, 'variety_model.h5')),
+            'age_efficientnet': AgeRegressor(num_labels=3, num_varieties=17)
+        }
+        MODELS['age_efficientnet'].load_state_dict(torch.load(os.path.join(MODELS_FOLDER, 'age_model.pth'), map_location='cpu'))
+        MODELS['age_efficientnet'].eval()
+        logger.info("Models loaded successfully!")
+        return True
+    except Exception as e:
+        logger.error(f"Error loading models: {e}")
+        return False
 
-MODELS = load_models()
+# Initialize models as None
+MODELS = None
 
 # === CLASSES ===
 diseases = ['bacterial_leaf_blight', 'bacterial_leaf_streak', 'bacterial_panicle_blight', 'blast', 'brown_spot', 'dead_heart', 'downy_mildew', 'hispa', 'normal', 'tungro']
 varieties = ['ADT45', 'AndraPonni', 'AtchayaPonni', 'IR20', 'KarnatakaPonni', 'Onthanel', 'Ponni', 'RR', 'Surya', 'Zonal']
 
+# Function to initialize models
+def initialize_models():
+    """Check and load models if they're not already loaded."""
+    global MODELS
+    if MODELS is None:
+        logger.info("Checking and loading models...")
+        if load_models():
+            logger.info("Models loaded successfully")
+        else:
+            logger.warning("Failed to load models")
+
+# Initialize models when app starts (compatible with Flask 2.3+)
+with app.app_context():
+    initialize_models()
+
 # === MAIN PREDICTION ENDPOINT ===
 @app.route('/predict_all', methods=['POST'])
 def predict_all():
+    global MODELS
+    
+    # Check if models are loaded
+    if MODELS is None:
+        initialize_models()
+        
+    # If models still couldn't be loaded after trying to initialize
+    if MODELS is None:
+        return jsonify({'error': 'Models could not be loaded. Please check the logs.'}), 500
+    
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
 
@@ -139,11 +248,55 @@ def predict_all():
         return jsonify(predictions)
 
     except Exception as e:
+        logger.error(f"Error during prediction: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         if os.path.exists(filepath):
             os.remove(filepath)
 
+# === Health check endpoint with more details ===
+@app.route('/health', methods=['GET'])
+def health_check():
+    global MODELS
+    
+    model_status = {}
+    if MODELS is not None:
+        for model_name in MODELS:
+            model_status[model_name] = "loaded"
+    
+    # Check if model files exist even if not loaded in memory
+    disease_model_path = os.path.join(MODELS_FOLDER, 'diseased_model.h5')
+    variety_model_path = os.path.join(MODELS_FOLDER, 'variety_model.h5')
+    age_model_path = os.path.join(MODELS_FOLDER, 'age_model.pth')
+    
+    files_exist = {
+        'diseased_model.h5': os.path.exists(disease_model_path),
+        'variety_model.h5': os.path.exists(variety_model_path),
+        'age_model.pth': os.path.exists(age_model_path)
+    }
+    
+    return jsonify({
+        'status': 'ok', 
+        'models_loaded': MODELS is not None,
+        'model_status': model_status,
+        'model_files': files_exist
+    })
+
+# === Manual model loading endpoint ===
+@app.route('/load_models', methods=['POST'])
+def load_models_endpoint():
+    initialize_models()
+    if MODELS is not None:
+        return jsonify({'status': 'success', 'message': 'Models loaded successfully'})
+    else:
+        return jsonify({'status': 'error', 'message': 'Failed to load models'}), 500
+
 # === RUN FLASK ===
 if __name__ == '__main__':
+    # Try to load models at startup when run directly
+    if load_models():
+        logger.info("Models loaded successfully at startup")
+    else:
+        logger.warning("Models could not be loaded at startup. They will be loaded on first request.")
+    
     app.run(debug=True)
