@@ -33,7 +33,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(MODELS_FOLDER, exist_ok=True)
 
 # Google Drive model URL - extract the file ID for gdown
-GDRIVE_FILE_ID = '1RDI1mty4jugBDuIPG13jRKn_Gg4pZwBS'
+GDRIVE_FILE_ID = '1eRq0Nqz_pnSLD_WclAWQwuPusd8dJtPm'
 MODEL_ZIP_PATH = os.path.join(MODELS_FOLDER, 'models.zip')
 
 # Initialize models as None - will be loaded during app initialization
